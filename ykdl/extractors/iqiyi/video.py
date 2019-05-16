@@ -7,57 +7,15 @@ from ykdl.extractor import VideoExtractor
 from ykdl.videoinfo import VideoInfo
 from ykdl.compact import urlencode, compact_bytes
 
+from .util import get_macid, md5, md5x, cmd5x
+
 import json
 import time
-import hashlib
-import random
-
-macid = None
-
-def get_macid():
-    '''获取macid,此值是通过mac地址经过算法变换而来,对同一设备不变'''
-    global macid
-    if macid is None:
-        macid = ''
-        chars = 'abcdefghijklnmopqrstuvwxyz0123456789'
-        size = len(chars)
-        for i in range(32):
-            macid += list(chars)[random.randint(0,size-1)]
-    return macid
-
-def md5(s):
-    return hashlib.md5(compact_bytes(s, 'utf8')).hexdigest()
-
-def md5x(s):
-    #sufix = ''
-    #for j in range(8):
-    #    for k in range(4):
-    #        v4 = 13 * (66 * k + 27 * j) % 35
-    #        if ( v4 >= 10 ):
-    #            v8 = v4 + 88
-    #        else:
-    #            v8 = v4 + 49
-    #        sufix += chr(v8)
-    return md5(s + '1j2k2k3l3l4m4m5n5n6o6o7p7p8q8q9r')
-
-def cmd5x(s):
-    # the param src below uses salt h2l6suw16pbtikmotf0j79cej4n8uw13
-    #    01010031010000000000
-    #    01010031010010000000
-    #    01080031010000000000
-    #    01080031010010000000
-    #    03020031010000000000
-    #    03020031010010000000
-    #    03030031010000000000
-    #    03030031010010000000
-    #    02020031010000000000
-    #    02020031010010000000
-    return md5(s + 'h2l6suw16pbtikmotf0j79cej4n8uw13')
 
 def gettmts(tvid, vid):
     tm = int(time.time() * 1000)
     key = 'd5fb4bd9d50c4be6948c97edd7254b0e'
-    host = 'http://cache.m.iqiyi.com'
+    host = 'https://cache.m.iqiyi.com'
     params = {
         'src': '76f90cbd92f94a2e925d83e8ccd22cb7',
         'sc': md5(str(tm) + key + vid),
@@ -148,18 +106,19 @@ class Iqiyi(VideoExtractor):
 
     def prepare(self):
         info = VideoInfo(self.name)
+
         if self.url and not self.vid:
             vid = matchall(self.url, ['curid=([^_]+)_([\w]+)'])
             if vid:
                 self.vid = vid[0]
-                info_u = 'http://mixer.video.iqiyi.com/jp/mixin/videos/' + self.vid[0]
-                mixin = get_content(info_u)
-                mixin_json = json.loads(mixin[len('var tvInfoJs='):])
-                real_u = mixin_json['url']
-                real_html = get_content(real_u)
-                info.title = match1(real_html, '<title>([^<]+)').split('-')[0]
+                info_u = 'http://pcw-api.iqiyi.com/video/video/playervideoinfo?tvid=' + self.vid[0]
+                try:
+                    info_json = json.loads(get_content(info_u))
+                    info.title = info_json['data']['vn']
+                except:
+                    self.vid = None
 
-        if self.url and not self.vid:
+        def get_vid():
             html = get_content(self.url)
             video_info = match1(html, ":video-info='(.+?)'")
 
@@ -170,29 +129,36 @@ class Iqiyi(VideoExtractor):
 
             else:
                 tvid = match1(html,
-                              'data-player-tvid="([^"]+)"',
-                              'tvid="(.+?)"',
-                              'tvId:([^,]+)',
-                              r'''param\['tvid'\]\s*=\s*"(.+?)"''',
-                              r'"tvid":\s*"(\d+)"')
+                              'tvId:\s*"([^"]+)',
+                              'data-video-tvId="([^"]+)',
+                              '''\['tvid'\]\s*=\s*"([^"]+)''',
+                              '"tvId":\s*([^,]+)')
                 videoid = match1(html,
-                                'data-player-videoid="([^"]+)"',
-                                'vid="(.+?)"',
-                                'vid:"([^"]+)',
-                                r'''param\['vid'\]\s*=\s*"(.+?)"''',
-                                r'"vid":\s*"(\w+)"')
+                                'data-video-vid="([^"]+)',
+                                'vid:\s*"([^"]+)',
+                                '''\['vid'\]\s*=\s*"([^"]+)''',
+                                '"vid":\s*([^,]+)')
+                if not (tvid and videoid):
+                    url = match1(html, '(www\.iqiyi\.com/v_\w+\.html)')
+                    if url:
+                        self.url = 'https://' + url
+                        return get_vid()
                 self.vid = (tvid, videoid)
                 info.title = match1(html, '<title>([^<]+)').split('-')[0]
 
+        if self.url and not self.vid:
+            get_vid()
         tvid, vid = self.vid
+        assert tvid and vid, 'can\'t play this video!!'
 
         def push_stream_vd(vs):
             vd = vs['vd']
             stream = self.vd_2_id[vd]
-            if int(vd) < 10 and stream in info.streams:
+            if not stream in info.streams:
+                info.stream_types.append(stream)
+            elif int(vd) < 10: 
                 return
             m3u8 = vs['m3utx']
-            info.stream_types.append(stream)
             stream_profile = self.id_2_profile[stream]
             info.streams[stream] = {
                 'video_profile': stream_profile,
@@ -224,6 +190,7 @@ class Iqiyi(VideoExtractor):
             # try use tmts first
             # less http requests, get results quickly
             tmts_data = gettmts(tvid, vid)
+            self.logger.debug('tmts_data:\n' + str(tmts_data))
             assert tmts_data['code'] == 'A00000', 'can\'t play this video!!'
             vs_array = tmts_data['data']['vidl']
             for vs in vs_array:
@@ -242,6 +209,7 @@ class Iqiyi(VideoExtractor):
             try:
                 # use vps as preferred fallback
                 vps_data = getvps(tvid, vid)
+                self.logger.debug('vps_data:\n' + str(vps_data))
                 assert vps_data['code'] == 'A00000', 'can\'t play this video!!'
                 url_prefix = vps_data['data']['vp']['du']
                 vs_array = vps_data['data']['vp']['tkl'][0]['vs']
@@ -255,6 +223,7 @@ class Iqiyi(VideoExtractor):
                 # use dash as fallback
                 for bid in (500, 300, 200, 100):
                     dash_data = getdash(tvid, vid, bid)
+                    self.logger.debug('dash_data:\n' + str(dash_data))
                     assert dash_data['code'] == 'A00000', 'can\'t play this video!!'
                     url_prefix = dash_data['data']['dd']
                     streams = dash_data['data']['program']['video']
