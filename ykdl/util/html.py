@@ -3,11 +3,30 @@
 
 import re
 from logging import getLogger
-from ykdl.compact import Request, urlopen
+from ykdl.compact import Request, urlopen, install_opener, build_opener
 
 from .match import match1
 
-default_proxy_handler = []
+
+logger = getLogger("html")
+
+default_handlers = []
+
+def add_default_handler(handler):
+    if isinstance(handler, type):
+        handler = handler()
+    remove = []
+    for default_handler in default_handlers:
+        if isinstance(handler, type(default_handler)) or isinstance(default_handler, type(handler)):
+            remove.append(default_handler)
+    for _handler in remove:
+        default_handlers.remove(_handler)
+        logger.debug('Remove %s from default handlers' % _handler)
+    default_handlers.append(handler)
+    logger.debug('Add %s to default handlers' % handler)
+
+def install_default_handlers():
+    install_opener(build_opener(*default_handlers))
 
 fake_headers = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -16,11 +35,14 @@ fake_headers = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:38.0) Gecko/20100101 Firefox/38.0 Iceweasel/38.2.1'
 }
 
-logger = getLogger("html")
+fake_headers_without_ae = fake_headers.copy()
+del fake_headers_without_ae['Accept-Encoding']
 
 def add_header(key, value):
-    global fake_headers
+    global fake_headers, fake_headers_without_ae
     fake_headers[key] = value
+    if key != 'Accept-Encoding':
+        fake_headers_without_ae[key] = value
 
 def unicodize(text):
     return re.sub(r'\\u([0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])', lambda x: chr(int(x.group(0)[2:], 16)), text)
@@ -42,13 +64,32 @@ def undeflate(data):
     decompressobj = zlib.decompressobj(-zlib.MAX_WBITS)
     return decompressobj.decompress(data)+decompressobj.flush()
 
-def get_location(url, headers = fake_headers):
-    response = urlopen(Request(url, headers = headers))
+def get_head_response(url, headers=fake_headers):
+    try:
+        req = Request(url, headers=headers)
+        req.get_method = lambda: 'HEAD'
+        response = urlopen(req)
+    except IOError as e:
+        # if HEAD method is not supported
+        if 'HTTP Error 405' in str(e):
+            req = Request(url, headers=headers)
+            response = urlopen(req)
+            response.close()
+        else:
+            raise
     # urllib will follow redirections and it's too much code to tell urllib
     # not to do that
+    return response
+
+def get_location(url, headers=fake_headers):
+    response = get_head_response(url, headers=headers)
     return response.geturl()
 
-def get_content(url, headers=fake_headers, data=None, charset = None):
+def get_location_and_header(url, headers=fake_headers):
+    response = get_head_response(url, headers=headers)
+    return response.geturl(), response.info()
+
+def get_content(url, headers=fake_headers, data=None, charset=None):
     """Gets the content of a URL via sending a HTTP GET request.
 
     Args:
@@ -100,13 +141,13 @@ def get_content(url, headers=fake_headers, data=None, charset = None):
     return data
 
 #DEPRECATED below, return None or 0
-def url_size(url, faker = False):
+def url_size(url, faker=False):
     return 0
 
 def urls_size(urls):
     return sum(map(url_size, urls))
 
-def url_info(url, faker = False):
+def url_info(url, faker=False):
     # in case url is http(s)://host/a/b/c.dd?ee&fff&gg
     # below is to get c.dd
     f = url.split('?')[0].split('/')[-1]

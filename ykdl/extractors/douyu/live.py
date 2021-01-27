@@ -3,14 +3,17 @@
 
 from ykdl.util.html import get_content, add_header
 from ykdl.util.match import match1, matchall
-from ykdl.util.jsengine import JSEngine, javascript_is_supported
 from ykdl.extractor import VideoExtractor
 from ykdl.videoinfo import VideoInfo
 from ykdl.compact import urlencode
 
+from .util import get_h5enc, ub98484234
+
 import time
 import json
 import uuid
+import random
+import string
 
 
 douyu_match_pattern = [ 'class="hroom_id" value="([^"]+)',
@@ -20,8 +23,9 @@ douyu_match_pattern = [ 'class="hroom_id" value="([^"]+)',
 class Douyutv(VideoExtractor):
     name = u'斗鱼直播 (DouyuTV)'
 
-    stream_ids = ['BD10M', 'BD8M', 'BD4M', 'BD', 'TD', 'HD', 'SD']
+    stream_ids = ['OG', 'BD10M', 'BD8M', 'BD4M', 'BD', 'TD', 'HD', 'SD']
     profile_2_id = {
+        u'原画': 'OG',
         u'蓝光10M': 'BD10M',
         u'蓝光8M': 'BD8M',
         u'蓝光4M': 'BD4M',
@@ -32,22 +36,19 @@ class Douyutv(VideoExtractor):
      }
 
     def prepare(self):
-        assert javascript_is_supported, "No JS Interpreter found, can't parse douyu live!"
-
         info = VideoInfo(self.name, True)
         add_header("Referer", 'https://www.douyu.com')
 
         html = get_content(self.url)
-        self.vid = match1(html, '\$ROOM\.room_id\s*\=\s*(\d+)',
+        self.vid = match1(html, '\$ROOM\.room_id\s*=\s*(\d+)',
                                 'room_id\s*=\s*(\d+)',
                                 '"room_id.?":(\d+)',
                                 'data-onlineid=(\d+)')
-        title = match1(html, 'Title-headlineH2">([^<]+)<')
-        artist = match1(html, 'Title-anchorName" title="([^"]+)"')
 
+        title = match1(html, 'Title-head\w*">([^<]+)<')
+        artist = match1(html, 'Title-anchorName\w*" title="([^"]+)"')
         if not title or not artist:
-            html = get_content('https://open.douyucdn.cn/api/RoomApi/room/' + self.vid)
-            room_data = json.loads(html)
+            room_data = json.loads(get_content('https://open.douyucdn.cn/api/RoomApi/room/' + self.vid))
             if room_data['error'] == 0:
                 room_data = room_data['data']
                 title = room_data['room_name']
@@ -56,36 +57,13 @@ class Douyutv(VideoExtractor):
         info.title = u'{} - {}'.format(title, artist)
         info.artist = artist
 
-        html_h5enc = get_content('https://www.douyu.com/swf_api/homeH5Enc?rids=' + self.vid)
-        data = json.loads(html_h5enc)
-        assert data['error'] == 0, data['msg']
-        js_enc = data['data']['room' + self.vid]
-
-        try:
-            # try load local .js file first
-            # from https://cdnjs.com/libraries/crypto-js
-            from pkgutil import get_data
-            js_md5 = get_data(__name__, 'crypto-js-md5.min.js')
-            if isinstance(js_md5, bytes):
-                js_md5 = js_md5.decode()
-        except IOError:
-            js_md5 = get_content('https://cdnjs.cloudflare.com/ajax/libs/crypto-js/3.1.9-1/crypto-js.min.js')
-
-        js_ctx = JSEngine(js_md5)
-        js_ctx.eval(js_enc)
-        did = uuid.uuid4().hex
-        tt = str(int(time.time()))
-        ub98484234 = js_ctx.call('ub98484234', self.vid, did, tt)
-        self.logger.debug('ub98484234: ' + ub98484234)
+        js_enc = get_h5enc(html, self.vid)
         params = {
-            'v': match1(ub98484234, 'v=(\d+)'),
-            'did': did,
-            'tt': tt,
-            'sign': match1(ub98484234, 'sign=(\w{32})'),
             'cdn': '',
             'iar': 0,
             'ive': 0
         }
+        ub98484234(js_enc, self, params)
 
         def get_live_info(rate=0):
             params['rate'] = rate
@@ -108,7 +86,7 @@ class Douyutv(VideoExtractor):
                 return
             info.stream_types.append(stream)
             info.streams[stream] = {
-                'container': 'flv',
+                'container': match1(live_data['rtmp_live'], '\.(\w+)\?'),
                 'video_profile': video_profile,
                 'src' : [real_url],
                 'size': float('inf')

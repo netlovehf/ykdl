@@ -1,17 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from ykdl.util.html import default_proxy_handler, get_content, add_header
+from ykdl.util.html import add_default_handler, install_default_handlers, get_content, add_header
 from ykdl.util.match import match1, matchall
 from ykdl.extractor import VideoExtractor
 from ykdl.videoinfo import VideoInfo
-from ykdl.compact import install_opener, build_opener, HTTPCookieProcessor
+from ykdl.compact import HTTPCookieProcessor
 
 import json
 import sys
 import base64
 import uuid
 import time
+
+ua = 'AppleCoreMedia/1.0.0.16E227 (iPhone; U; CPU OS 12_2 like Mac OS X; zh_cn)'
 
 py3 = sys.version_info[0] == 3
 if py3:
@@ -48,16 +50,20 @@ def generate_tk2(did):
 class Hunantv(VideoExtractor):
     name = u"芒果TV (HunanTV)"
 
-    supported_stream_profile = [ u'蓝光', u'超清', u'高清', u'标清' ]
     supported_stream_types = [ 'BD', 'TD', 'HD', 'SD' ]
-    profile_2_types = { u'蓝光': 'BD', u'超清': 'TD', u'高清': 'HD', u'标清': 'SD' }
-    
+    profile_2_types = {
+        u'复刻版': 'BD',
+        u'蓝光': 'BD',
+        u'超清': 'TD',
+        u'高清': 'HD',
+        u'标清': 'SD'
+    }
+
     def prepare(self):
-        handlers = [HTTPCookieProcessor()]
-        if default_proxy_handler:
-            handlers += default_proxy_handler
-        install_opener(build_opener(*handlers))
-        add_header("Referer", self.url)
+        add_default_handler(HTTPCookieProcessor)
+        install_default_handlers()
+        add_header('Referer', self.url)
+        add_header('User-Agent', ua)
 
         info = VideoInfo(self.name)
         if self.url and not self.vid:
@@ -76,7 +82,7 @@ class Hunantv(VideoExtractor):
         assert meta['data'], '[Failed] Video info not found.'
 
         pm2 = meta['data']['atc']['pm2']
-        info.title = meta['data']['info']['title']
+        info.title = meta['data']['info']['title'] + ' ' + meta['data']['info']['desc']
 
         api_source_url = 'https://pcweb.api.mgtv.com/player/getSource?pm2={}&tk2={}&video_id={}&type=pch5'.format(pm2, tk2, self.vid)
         meta = json.loads(get_content(api_source_url))
@@ -86,15 +92,22 @@ class Hunantv(VideoExtractor):
 
         data = meta['data']
         domain = data['stream_domain'][0]
-        tk2 = generate_tk2(did)
         for lstream in data['stream']:
             lurl = lstream['url']
             if lurl:
                 lurl = '{}{}&did={}'.format(domain, lurl, did)
                 url = json.loads(get_content(lurl))['info']
-                info.streams[self.profile_2_types[lstream['name']]] = {'container': 'm3u8', 'video_profile': lstream['name'], 'src' : [url]}
-                info.stream_types.append(self.profile_2_types[lstream['name']])
+                video_profile = lstream['name']
+                stream = self.profile_2_types[video_profile]
+                info.streams[stream] = {
+                    'container': 'm3u8',
+                    'video_profile': video_profile,
+                    'src' : [url]
+                }
+                info.stream_types.append(stream)
         info.stream_types= sorted(info.stream_types, key = self.supported_stream_types.index)
+        info.extra['referer'] = self.url
+        info.extra['ua'] = ua
         return info
 
     def prepare_list(self):
